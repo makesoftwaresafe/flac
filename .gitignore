@@ -38,7 +38,9 @@ m4/ltsugar.m4
 m4/ltversion.m4
 m4/lt~obsolete.m4
 man/flac.1
+man/flac.html
 man/metaflac.1
+man/metaflac.html
 missing
 objs/debug
 objs/release
@@ -55,6 +57,7 @@ src/test_seeking/test_seeking
 src/test_streams/test_streams
 stamp-h1
 test/*.aiff
+test/*.aifc
 test/*.cmp
 test/*.cue
 test/*.flac
@@ -72,7 +75,6 @@ test/metaflac.flac
 test/picture.diff
 test/picture.log
 .dirstamp
-microbench/benchmark_residual
 /ogg/
 oss-fuzz/fuzzer_decoder
 oss-fuzz/fuzzer_seek

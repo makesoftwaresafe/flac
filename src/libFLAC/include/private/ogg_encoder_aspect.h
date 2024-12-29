@@ -1,6 +1,6 @@
 /* libFLAC - Free Lossless Audio Codec
  * Copyright (C) 2002-2009  Josh Coalson
- * Copyright (C) 2011-2023  Xiph.Org Foundation
+ * Copyright (C) 2011-2024  Xiph.Org Foundation
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -49,6 +49,7 @@ typedef struct FLAC__OggEncoderAspect {
 	FLAC__bool seen_magic; /* true if we've seen the fLaC magic in the write callback yet */
 	FLAC__bool is_first_packet;
 	FLAC__uint64 samples_written;
+	FLAC__int64 last_page_granule_pos;
 } FLAC__OggEncoderAspect;
 
 void FLAC__ogg_encoder_aspect_set_serial_number(FLAC__OggEncoderAspect *aspect, long value);

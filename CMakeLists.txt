@@ -1,8 +1,4 @@
-# 3.1 is OK for most parts. However:
-# 3.3 is needed in src/libFLAC
-# 3.5 is needed in src/libFLAC/ia32
-# 3.9 is needed in 'doc' because of doxygen_add_docs()
-cmake_minimum_required(VERSION 3.5)
+cmake_minimum_required(VERSION 3.12...3.31)
 
 if(NOT (CMAKE_BUILD_TYPE OR CMAKE_CONFIGURATION_TYPES OR DEFINED ENV{CFLAGS} OR DEFINED ENV{CXXFLAGS}))
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Choose the type of build, options are: None Debug Release RelWithDebInfo")
@@ -125,7 +121,15 @@ else()
     check_include_file("x86intrin.h" FLAC__HAS_X86INTRIN)
 endif()
 
-check_function_exists(fseeko HAVE_FSEEKO)
+
+if(ANDROID AND CMAKE_SYSTEM_VERSION VERSION_LESS 24 AND (CMAKE_SYSTEM_PROCESSOR MATCHES "i686" OR CMAKE_SYSTEM_PROCESSOR MATCHES "armv7-a"))
+    # fseeko/ftello may link, but it's not usable before Android API 24 on 32-bit Android
+    # https://android.googlesource.com/platform/bionic/+/main/docs/32-bit-abi.md
+    message(STATUS "Disabling fseeko/ftello for 32-bit Android before API 24")
+    set(HAVE_FSEEKO 0 CACHE INTERNAL "")
+else()
+    check_function_exists(fseeko HAVE_FSEEKO)
+endif()
 
 check_c_source_compiles("int main() { return __builtin_bswap16 (0) ; }" HAVE_BSWAP16)
 check_c_source_compiles("int main() { return __builtin_bswap32 (0) ; }" HAVE_BSWAP32)
@@ -151,13 +155,16 @@ if(MINGW AND (WITH_FORTIFY_SOURCE OR WITH_STACK_PROTECTOR))
     message(WARNING "Could not find libssp in MinGW, stack protection and/or FORTIFY_SOURCE are unavailable")
   else()
     link_libraries("ssp.a")
+    # static libraries don't carry over other static libraries in mingw
+    # we need to export it in the pkg-config
+    set(FLAC_STATIC_LIBS "-lssp")
   endif()
 elseif(NOT MSVC)
   set(HAVE_LIBSSP 1)
 endif()
 
 if(WITH_STACK_PROTECTOR)
-  if(NOT MSVC)
+  if(NOT MSVC AND NOT EMSCRIPTEN)
     check_c_compiler_flag("-fstack-protector-strong" HAVE_STACK_PROTECTOR_FLAG)
   endif()
 endif()
@@ -209,7 +216,6 @@ if(ENABLE_MULTITHREADING)
 endif()
 
 add_subdirectory("src")
-add_subdirectory("microbench")
 if(BUILD_DOCS)
     add_subdirectory("doc")
 endif()
@@ -289,7 +295,15 @@ if(INSTALL_MANPAGES)
             OUTPUT man/metaflac.1
             COMMAND pandoc --standalone --to man "${CMAKE_SOURCE_DIR}/man/metaflac.md" > man/metaflac.1
             )
-               add_custom_target(man ALL DEPENDS man/flac.1 man/metaflac.1)
+        add_custom_command(
+            OUTPUT man/flac.html
+            COMMAND pandoc --standalone --embed-resources --to html "${CMAKE_SOURCE_DIR}/man/flac.md" > man/flac.html || pandoc --self-contained --to html "${CMAKE_SOURCE_DIR}/man/flac.md" > man/flac.html
+            )
+        add_custom_command(
+            OUTPUT man/metaflac.html
+            COMMAND pandoc --standalone --embed-resources --to html "${CMAKE_SOURCE_DIR}/man/metaflac.md" > man/metaflac.html || pandoc --self-contained --to html "${CMAKE_SOURCE_DIR}/man/metaflac.md" > man/metaflac.html
+            )
+        add_custom_target(man ALL DEPENDS man/flac.1 man/metaflac.1 man/flac.html man/metaflac.html)
         install(FILES "${CMAKE_BINARY_DIR}/man/flac.1" "${CMAKE_BINARY_DIR}/man/metaflac.1" DESTINATION "${CMAKE_INSTALL_MANDIR}/man1")
     else()
         if(EXISTS "${CMAKE_SOURCE_DIR}/man/flac.1" AND EXISTS "${CMAKE_SOURCE_DIR}/man/metaflac.1")

@@ -1,6 +1,6 @@
 #  FLAC - Free Lossless Audio Codec
 #  Copyright (C) 2001-2009  Josh Coalson
-#  Copyright (C) 2011-2023  Xiph.Org Foundation
+#  Copyright (C) 2011-2024  Xiph.Org Foundation
 #
 #  This file is part the FLAC project.  FLAC is comprised of several
 #  components distributed under different licenses.  The codec libraries
@@ -53,7 +53,7 @@ AM_PROG_CC_C_O
 AC_C_INLINE
 AC_C_TYPEOF
 
-AC_CHECK_HEADERS([stdint.h stdbool.h inttypes.h byteswap.h sys/auxv.h sys/param.h sys/ioctl.h termios.h x86intrin.h cpuid.h arm_neon.h])
+AC_CHECK_HEADERS([stdint.h stdbool.h inttypes.h byteswap.h sys/auxv.h sys/param.h sys/ioctl.h sys/time.h termios.h x86intrin.h cpuid.h arm_neon.h])
 
 if test "x$ac_cv_header_stdint_h" != xyes -o "x$ac_cv_header_stdbool_h" != xyes; then
 AC_MSG_ERROR("Header stdint.h and/or stdbool.h not found")
@@ -79,7 +79,7 @@ AC_DEFINE_UNQUOTED(CPU_IS_LITTLE_ENDIAN, ${ac_cv_c_little_endian},
 AC_DEFINE_UNQUOTED(WORDS_BIGENDIAN, ${ac_cv_c_big_endian},
 					[Target processor is big endian.])
 
-AC_ARG_ENABLE(asm-optimizations, AS_HELP_STRING([--disable-asm-optimizations],[Do not use any CPU specific optimization routines]), asm_opt=no, asm_opt=yes)
+AC_ARG_ENABLE(asm-optimizations, AS_HELP_STRING([--disable-asm-optimizations],[Do not use any CPU specific optimization routines]), asm_opt=${enableval}, asm_opt=yes)
 AM_CONDITIONAL(FLaC__NO_ASM, test "x$asm_opt" = xno)
 if test "x$asm_opt" = xno ; then
 AC_DEFINE(FLAC__NO_ASM)
@@ -532,6 +532,7 @@ AC_SUBST(GIT_COMMIT_VERSION_HASH)
 AX_CHECK_COMPILE_FLAG([-fassociative-math -fno-signed-zeros -fno-trapping-math -freciprocal-math],HAVE_ASSOC_MATH=yes)
 AM_CONDITIONAL(ASSOC_MATH_AVAILABLE, test "x$HAVE_ASSOC_MATH" = "xyes")
 
+AC_SUBST(FLAC_STATIC_LIBS) dnl unused here
 
 AC_CONFIG_FILES([ \
 	Makefile \
@@ -586,7 +587,6 @@ AC_CONFIG_FILES([ \
 	test/flac-to-flac-metadata-test-files/Makefile \
 	test/metaflac-test-files/Makefile \
 	test/pictures/Makefile \
-	microbench/Makefile \
 	oss-fuzz/Makefile
 ])
 AC_OUTPUT

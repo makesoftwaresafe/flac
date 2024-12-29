@@ -1,6 +1,6 @@
 /* libFLAC - Free Lossless Audio Codec library
  * Copyright (C) 2000-2009  Josh Coalson
- * Copyright (C) 2011-2023  Xiph.Org Foundation
+ * Copyright (C) 2011-2024  Xiph.Org Foundation
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -82,6 +82,11 @@
  * yielding compression within 0.1% of the optimal parameters.
  */
 #undef ENABLE_RICE_PARAMETER_SEARCH
+
+#ifdef local_abs64
+#undef local_abs64
+#endif
+#define local_abs64(x) ((uint64_t)((x)<0? -(x) : (x)))
 
 
 typedef struct {
@@ -413,9 +418,6 @@ typedef struct FLAC__StreamEncoderPrivate {
 	FLAC__real *window[FLAC__MAX_APODIZATION_FUNCTIONS]; /* the pre-computed floating-point window for each apodization function */
 	FLAC__real *window_unaligned[FLAC__MAX_APODIZATION_FUNCTIONS];
 #endif
-	uint32_t loose_mid_side_stereo_frames;            /* rounded number of frames the encoder will use before trying both independent and mid/side frames again */
-	uint32_t loose_mid_side_stereo_frame_count;       /* number of frames using the current channel assignment */
-	FLAC__ChannelAssignment last_channel_assignment;
 	FLAC__StreamMetadata streaminfo;                  /* scratchpad for STREAMINFO as it is built */
 	FLAC__StreamMetadata_SeekTable *seek_table;       /* pointer into encoder->protected_->metadata_ where the seek table is */
 	uint32_t current_sample_number;
@@ -737,9 +739,6 @@ static FLAC__StreamEncoderInitStatus init_stream_internal_(
 	else if(!encoder->protected_->do_mid_side_stereo)
 		encoder->protected_->loose_mid_side_stereo = false;
 
-	if(encoder->protected_->loose_mid_side_stereo && encoder->protected_->num_threads > 2)
-		encoder->protected_->num_threads = 2;
-
 	if(encoder->protected_->bits_per_sample < FLAC__MIN_BITS_PER_SAMPLE || encoder->protected_->bits_per_sample > FLAC__MAX_BITS_PER_SAMPLE)
 		return FLAC__STREAM_ENCODER_INIT_STATUS_INVALID_BITS_PER_SAMPLE;
 
@@ -921,20 +920,6 @@ static FLAC__StreamEncoderInitStatus init_stream_internal_(
 	}
 
 	encoder->private_->input_capacity = 0;
-#ifndef FLAC__INTEGER_ONLY_LIBRARY
-	encoder->private_->loose_mid_side_stereo_frames = (uint32_t)((double)encoder->protected_->sample_rate * 0.4 / (double)encoder->protected_->blocksize + 0.5);
-#else
-	/* 26214 is the approximate fixed-point equivalent to 0.4 (0.4 * 2^16) */
-	/* sample rate can be up to 1048575 Hz, and thus use 20 bits, so we do the multiply&divide by hand */
-	FLAC__ASSERT(FLAC__MAX_SAMPLE_RATE <= 1048575);
-	FLAC__ASSERT(FLAC__MAX_BLOCK_SIZE <= 65535);
-	FLAC__ASSERT(encoder->protected_->sample_rate <= 1048575);
-	FLAC__ASSERT(encoder->protected_->blocksize <= 65535);
-	encoder->private_->loose_mid_side_stereo_frames = (uint32_t)FLAC__fixedpoint_trunc((((FLAC__uint64)(encoder->protected_->sample_rate) * (FLAC__uint64)(26214)) << 16) / (encoder->protected_->blocksize<<16) + FLAC__FP_ONE_HALF);
-#endif
-	if(encoder->private_->loose_mid_side_stereo_frames == 0)
-		encoder->private_->loose_mid_side_stereo_frames = 1;
-	encoder->private_->loose_mid_side_stereo_frame_count = 0;
 	encoder->private_->current_sample_number = 0;
 	encoder->private_->current_frame_number = 0;
 
@@ -2325,7 +2310,10 @@ FLAC_API FLAC__StreamDecoderState FLAC__stream_encoder_get_verify_decoder_state(
 	FLAC__ASSERT(0 != encoder->private_);
 	FLAC__ASSERT(0 != encoder->protected_);
 	if(encoder->protected_->verify)
-		return FLAC__stream_decoder_get_state(encoder->private_->verify.decoder);
+		if(encoder->private_->verify.decoder == NULL)
+			return FLAC__STREAM_DECODER_MEMORY_ALLOCATION_ERROR;
+		else
+			return FLAC__stream_decoder_get_state(encoder->private_->verify.decoder);
 	else
 		return FLAC__STREAM_DECODER_UNINITIALIZED;
 }
@@ -2337,6 +2325,8 @@ FLAC_API const char *FLAC__stream_encoder_get_resolved_state_string(const FLAC__
 	FLAC__ASSERT(0 != encoder->protected_);
 	if(encoder->protected_->state != FLAC__STREAM_ENCODER_VERIFY_DECODER_ERROR)
 		return FLAC__StreamEncoderStateString[encoder->protected_->state];
+	else if(!encoder->private_->verify.decoder)
+		return FLAC__StreamEncoderStateString[FLAC__STREAM_ENCODER_MEMORY_ALLOCATION_ERROR];
 	else
 		return FLAC__stream_decoder_get_resolved_state_string(encoder->private_->verify.decoder);
 }
@@ -3042,17 +3032,18 @@ FLAC__StreamEncoderWriteStatus write_frame_(FLAC__StreamEncoder *encoder, const 
 	(void)is_last_block;
 #endif
 
-	/* FLAC__STREAM_ENCODER_TELL_STATUS_UNSUPPORTED just means we didn't get the offset; no error */
-	if(encoder->private_->tell_callback && encoder->private_->tell_callback(encoder, &output_position, encoder->private_->client_data) == FLAC__STREAM_ENCODER_TELL_STATUS_ERROR) {
-		encoder->protected_->state = FLAC__STREAM_ENCODER_CLIENT_ERROR;
-		return FLAC__STREAM_ENCODER_WRITE_STATUS_FATAL_ERROR;
-	}
-
 	/*
 	 * Watch for the STREAMINFO block and first SEEKTABLE block to go by and store their offsets.
 	 */
 	if(samples == 0) {
 		FLAC__MetadataType type = (buffer[0] & 0x7f);
+
+		/* FLAC__STREAM_ENCODER_TELL_STATUS_UNSUPPORTED just means we didn't get the offset; no error */
+		if(encoder->private_->tell_callback && encoder->private_->tell_callback(encoder, &output_position, encoder->private_->client_data) == FLAC__STREAM_ENCODER_TELL_STATUS_ERROR) {
+			encoder->protected_->state = FLAC__STREAM_ENCODER_CLIENT_ERROR;
+			return FLAC__STREAM_ENCODER_WRITE_STATUS_FATAL_ERROR;
+		}
+
 		if(type == FLAC__METADATA_TYPE_STREAMINFO)
 			encoder->protected_->streaminfo_offset = output_position;
 		else if(type == FLAC__METADATA_TYPE_SEEKTABLE && encoder->protected_->seektable_offset == 0)
@@ -3076,6 +3067,12 @@ FLAC__StreamEncoderWriteStatus write_frame_(FLAC__StreamEncoder *encoder, const 
 				break;
 			}
 			else if(test_sample >= frame_first_sample) {
+				/* FLAC__STREAM_ENCODER_TELL_STATUS_UNSUPPORTED just means we didn't get the offset; no error */
+				if(output_position == 0 && encoder->private_->tell_callback && encoder->private_->tell_callback(encoder, &output_position, encoder->private_->client_data) == FLAC__STREAM_ENCODER_TELL_STATUS_ERROR) {
+					encoder->protected_->state = FLAC__STREAM_ENCODER_CLIENT_ERROR;
+					return FLAC__STREAM_ENCODER_WRITE_STATUS_FATAL_ERROR;
+				}
+
 				encoder->private_->seek_table->points[i].sample_number = frame_first_sample;
 				encoder->private_->seek_table->points[i].stream_offset = output_position - encoder->protected_->audio_offset;
 				encoder->private_->seek_table->points[i].frame_samples = blocksize;
@@ -3188,14 +3185,15 @@ void update_metadata_(const FLAC__StreamEncoder *encoder)
 				FLAC__STREAM_METADATA_STREAMINFO_BITS_PER_SAMPLE_LEN
 				- 4
 			) / 8;
+		FLAC__uint64 samples_uint36 = samples;
 		if(samples > (FLAC__U64L(1) << FLAC__STREAM_METADATA_STREAMINFO_TOTAL_SAMPLES_LEN))
-			samples = 0;
+			samples_uint36 = 0;
 
-		b[0] = ((FLAC__byte)(bps-1) << 4) | (FLAC__byte)((samples >> 32) & 0x0F);
-		b[1] = (FLAC__byte)((samples >> 24) & 0xFF);
-		b[2] = (FLAC__byte)((samples >> 16) & 0xFF);
-		b[3] = (FLAC__byte)((samples >> 8) & 0xFF);
-		b[4] = (FLAC__byte)(samples & 0xFF);
+		b[0] = ((FLAC__byte)(bps-1) << 4) | (FLAC__byte)((samples_uint36 >> 32) & 0x0F);
+		b[1] = (FLAC__byte)((samples_uint36 >> 24) & 0xFF);
+		b[2] = (FLAC__byte)((samples_uint36 >> 16) & 0xFF);
+		b[3] = (FLAC__byte)((samples_uint36 >> 8) & 0xFF);
+		b[4] = (FLAC__byte)(samples_uint36 & 0xFF);
 		if((seek_status = encoder->private_->seek_callback(encoder, encoder->protected_->streaminfo_offset + total_samples_byte_offset, encoder->private_->client_data)) != FLAC__STREAM_ENCODER_SEEK_STATUS_OK) {
 			if(seek_status == FLAC__STREAM_ENCODER_SEEK_STATUS_ERROR)
 				encoder->protected_->state = FLAC__STREAM_ENCODER_CLIENT_ERROR;
@@ -3240,6 +3238,11 @@ void update_metadata_(const FLAC__StreamEncoder *encoder)
 	 */
 	if(0 != encoder->private_->seek_table && encoder->private_->seek_table->num_points > 0 && encoder->protected_->seektable_offset > 0) {
 		uint32_t i;
+
+		/* Convert unused seekpoints to placeholders */
+		for(i = 0; i < encoder->private_->seek_table->num_points; i++)
+			if(encoder->private_->seek_table->points[i].sample_number > samples)
+				encoder->private_->seek_table->points[i].sample_number = FLAC__STREAM_METADATA_SEEKPOINT_PLACEHOLDER;
 
 		FLAC__format_seektable_sort(encoder->private_->seek_table);
 
@@ -3423,9 +3426,10 @@ FLAC__bool process_frame_(FLAC__StreamEncoder *encoder, FLAC__bool is_last_block
 #ifdef HAVE_PTHREAD
 	uint32_t i;
 #endif
-	FLAC__ASSERT(encoder->protected_->state == FLAC__STREAM_ENCODER_OK);
-
 	if(encoder->protected_->num_threads < 2 || is_last_block) {
+
+		FLAC__ASSERT(encoder->protected_->state == FLAC__STREAM_ENCODER_OK);
+
 		/*
 		 * Accumulate raw signal to the MD5 signature
 		 */
@@ -3513,49 +3517,45 @@ FLAC__bool process_frame_(FLAC__StreamEncoder *encoder, FLAC__bool is_last_block
 		}
 		else if(encoder->private_->num_started_threadtasks == encoder->private_->num_threadtasks) {
 			/* If the first task in the queue is still running, check whether there is enough work
-			 * left in the queue. If there is, start on some */
-			if(encoder->protected_->loose_mid_side_stereo) {
-				pthread_mutex_lock(&encoder->private_->threadtask[encoder->private_->next_thread]->mutex_this_task);
-				if(!encoder->private_->threadtask[encoder->private_->next_thread]->task_done)
-					pthread_cond_wait(&encoder->private_->threadtask[encoder->private_->next_thread]->cond_task_done, &encoder->private_->threadtask[encoder->private_->next_thread]->mutex_this_task);
-			}
-			else {
-				/* First, check whether the mutex for the next due task is locked or free. If it is free (and thus acquired now) and
-				 * the task is done, proceed to the next bit (writing the bitbuffer). If it is either currently locked or not yet
-				 * processed, choose between starting on some work (if there is enough work in the queue) or waiting for the task
-				 * to finish. Either way, release the mutex first, so it doesn't get interlocked with the work queue mutex  */
-				int mutex_result = pthread_mutex_trylock(&encoder->private_->threadtask[encoder->private_->next_thread]->mutex_this_task);
-				while(mutex_result || !encoder->private_->threadtask[encoder->private_->next_thread]->task_done) {
-					if(!mutex_result)
-						pthread_mutex_unlock(&encoder->private_->threadtask[encoder->private_->next_thread]->mutex_this_task);
+			 * left in the queue. If there is, start on some
+			 * First, check whether the mutex for the next due task is locked or free. If it is free (and thus acquired now) and
+			 * the task is done, proceed to the next bit (writing the bitbuffer). If it is either currently locked or not yet
+			 * processed, choose between starting on some work (if there is enough work in the queue) or waiting for the task
+			 * to finish. Either way, release the mutex first, so it doesn't get interlocked with the work queue mutex  */
+			int mutex_result = pthread_mutex_trylock(&encoder->private_->threadtask[encoder->private_->next_thread]->mutex_this_task);
+			while(mutex_result || !encoder->private_->threadtask[encoder->private_->next_thread]->task_done) {
+				if(!mutex_result)
+					pthread_mutex_unlock(&encoder->private_->threadtask[encoder->private_->next_thread]->mutex_this_task);
 
-					pthread_mutex_lock(&encoder->private_->mutex_work_queue);
-					if(encoder->private_->num_available_threadtasks > (encoder->protected_->num_threads - 1)) {
-						FLAC__StreamEncoderThreadTask * task = NULL;
-						task = encoder->private_->threadtask[encoder->private_->next_threadtask];
-						encoder->private_->num_available_threadtasks--;
-						encoder->private_->next_threadtask++;
-						if(encoder->private_->next_threadtask == encoder->private_->num_threadtasks)
-							encoder->private_->next_threadtask = 1;
-						pthread_mutex_unlock(&encoder->private_->mutex_work_queue);
-						pthread_mutex_lock(&task->mutex_this_task);
-						process_frame_thread_inner_(encoder, task);
-						mutex_result = pthread_mutex_trylock(&encoder->private_->threadtask[encoder->private_->next_thread]->mutex_this_task);
-					}
-					else {
-						pthread_mutex_unlock(&encoder->private_->mutex_work_queue);
-						pthread_mutex_lock(&encoder->private_->threadtask[encoder->private_->next_thread]->mutex_this_task);
-						while(!encoder->private_->threadtask[encoder->private_->next_thread]->task_done)
-							pthread_cond_wait(&encoder->private_->threadtask[encoder->private_->next_thread]->cond_task_done,&encoder->private_->threadtask[encoder->private_->next_thread]->mutex_this_task);
-						mutex_result = 0;
-					}
+				pthread_mutex_lock(&encoder->private_->mutex_work_queue);
+				if(encoder->private_->num_available_threadtasks > (encoder->protected_->num_threads - 1)) {
+					FLAC__StreamEncoderThreadTask * task = NULL;
+					task = encoder->private_->threadtask[encoder->private_->next_threadtask];
+					encoder->private_->num_available_threadtasks--;
+					encoder->private_->next_threadtask++;
+					if(encoder->private_->next_threadtask == encoder->private_->num_threadtasks)
+						encoder->private_->next_threadtask = 1;
+					pthread_mutex_unlock(&encoder->private_->mutex_work_queue);
+					pthread_mutex_lock(&task->mutex_this_task);
+					process_frame_thread_inner_(encoder, task);
+					mutex_result = pthread_mutex_trylock(&encoder->private_->threadtask[encoder->private_->next_thread]->mutex_this_task);
+				}
+				else {
+					pthread_mutex_unlock(&encoder->private_->mutex_work_queue);
+					pthread_mutex_lock(&encoder->private_->threadtask[encoder->private_->next_thread]->mutex_this_task);
+					while(!encoder->private_->threadtask[encoder->private_->next_thread]->task_done)
+						pthread_cond_wait(&encoder->private_->threadtask[encoder->private_->next_thread]->cond_task_done,&encoder->private_->threadtask[encoder->private_->next_thread]->mutex_this_task);
+					mutex_result = 0;
 				}
 			}
 			/* Task is finished, write bitbuffer */
-			if(!encoder->private_->threadtask[encoder->private_->next_thread]->returnvalue)
+			if(!encoder->private_->threadtask[encoder->private_->next_thread]->returnvalue) {
+				pthread_mutex_unlock(&encoder->private_->threadtask[encoder->private_->next_thread]->mutex_this_task);
 				return false;
+			}
 			if(!write_bitbuffer_(encoder, encoder->private_->threadtask[encoder->private_->next_thread], encoder->protected_->blocksize, is_last_block)) {
 				/* the above function sets the state for us in case of an error */
+				pthread_mutex_unlock(&encoder->private_->threadtask[encoder->private_->next_thread]->mutex_this_task);
 				return false;
 			}
 			pthread_mutex_unlock(&encoder->private_->threadtask[encoder->private_->next_thread]->mutex_this_task);
@@ -3713,7 +3713,7 @@ FLAC__bool process_frame_thread_inner_(FLAC__StreamEncoder * encoder, FLAC__Stre
 	/*
 	 * CRC-16 the whole thing
 	 */
-	FLAC__ASSERT(FLAC__bitwriter_is_byte_aligned(task->frame));
+	FLAC__ASSERT(!ok || FLAC__bitwriter_is_byte_aligned(task->frame));
 	if(
 		ok &&
 		(
@@ -3764,14 +3764,33 @@ FLAC__bool process_subframes_(FLAC__StreamEncoder *encoder, FLAC__StreamEncoderT
 	 */
 	if(encoder->protected_->do_mid_side_stereo) {
 		if(encoder->protected_->loose_mid_side_stereo) {
-			FLAC__ASSERT(encoder->protected_->num_threads < 3);
-			if(encoder->private_->loose_mid_side_stereo_frame_count == 0) {
+			uint64_t sumAbsLR = 0, sumAbsMS = 0;
+			uint32_t i;
+			if(encoder->protected_->bits_per_sample < 25) {
+				for(i = 1; i < encoder->protected_->blocksize; i++) {
+					int32_t predictionLeft = threadtask->integer_signal[0][i] - threadtask->integer_signal[0][i-1];
+					int32_t predictionRight = threadtask->integer_signal[1][i] - threadtask->integer_signal[1][i-1];
+					sumAbsLR += abs(predictionLeft) + abs(predictionRight);
+					sumAbsMS += abs((predictionLeft + predictionRight) >> 1) + abs(predictionLeft - predictionRight);
+				}
+			}
+			else { /* bps 25 or higher */
+				for(i = 1; i < encoder->protected_->blocksize; i++) {
+					int64_t predictionLeft = (int64_t)threadtask->integer_signal[0][i] - (int64_t)threadtask->integer_signal[0][i-1];
+					int64_t predictionRight = (int64_t)threadtask->integer_signal[1][i] - (int64_t)threadtask->integer_signal[1][i-1];
+					sumAbsLR += local_abs64(predictionLeft) + local_abs64(predictionRight);
+					sumAbsMS += local_abs64((predictionLeft + predictionRight) >> 1) + local_abs64(predictionLeft - predictionRight);
+				}
+			}
+			if(sumAbsLR < sumAbsMS) {
 				do_independent = true;
-				do_mid_side = true;
+				do_mid_side = false;
+				frame_header.channel_assignment = FLAC__CHANNEL_ASSIGNMENT_INDEPENDENT;
 			}
 			else {
-				do_independent = (encoder->private_->last_channel_assignment == FLAC__CHANNEL_ASSIGNMENT_INDEPENDENT);
-				do_mid_side = !do_independent;
+				do_independent = false;
+				do_mid_side = true;
+				frame_header.channel_assignment = FLAC__CHANNEL_ASSIGNMENT_MID_SIDE;
 			}
 		}
 		else {
@@ -3903,17 +3922,14 @@ FLAC__bool process_subframes_(FLAC__StreamEncoder *encoder, FLAC__StreamEncoderT
 	/*
 	 * Compose the frame bitbuffer
 	 */
-	if(do_mid_side) {
+	if((do_independent && do_mid_side) || encoder->protected_->loose_mid_side_stereo) {
 		uint32_t left_bps = 0, right_bps = 0; /* initialized only to prevent superfluous compiler warning */
 		FLAC__Subframe *left_subframe = 0, *right_subframe = 0; /* initialized only to prevent superfluous compiler warning */
 		FLAC__ChannelAssignment channel_assignment;
 
 		FLAC__ASSERT(encoder->protected_->channels == 2);
 
-		if(encoder->protected_->loose_mid_side_stereo && encoder->private_->loose_mid_side_stereo_frame_count > 0) {
-			channel_assignment = (encoder->private_->last_channel_assignment == FLAC__CHANNEL_ASSIGNMENT_INDEPENDENT? FLAC__CHANNEL_ASSIGNMENT_INDEPENDENT : FLAC__CHANNEL_ASSIGNMENT_MID_SIDE);
-		}
-		else {
+		if(!encoder->protected_->loose_mid_side_stereo) {
 			uint32_t bits[4]; /* WATCHOUT - indexed by FLAC__ChannelAssignment */
 			uint32_t min_bits;
 			int ca;
@@ -3922,7 +3938,6 @@ FLAC__bool process_subframes_(FLAC__StreamEncoder *encoder, FLAC__StreamEncoderT
 			FLAC__ASSERT(FLAC__CHANNEL_ASSIGNMENT_LEFT_SIDE   == 1);
 			FLAC__ASSERT(FLAC__CHANNEL_ASSIGNMENT_RIGHT_SIDE  == 2);
 			FLAC__ASSERT(FLAC__CHANNEL_ASSIGNMENT_MID_SIDE    == 3);
-			FLAC__ASSERT(do_independent && do_mid_side);
 
 			/* We have to figure out which channel assignent results in the smallest frame */
 			bits[FLAC__CHANNEL_ASSIGNMENT_INDEPENDENT] = threadtask->best_subframe_bits         [0] + threadtask->best_subframe_bits         [1];
@@ -3935,23 +3950,21 @@ FLAC__bool process_subframes_(FLAC__StreamEncoder *encoder, FLAC__StreamEncoderT
 
 			/* When doing loose mid-side stereo, ignore left-side
 			 * and right-side options */
-			ca = encoder->protected_->loose_mid_side_stereo ? 3 : 1;
-			for( ; ca <= 3; ca++) {
+			for(ca = 1; ca <= 3; ca++) {
 				if(bits[ca] < min_bits) {
 					min_bits = bits[ca];
 					channel_assignment = (FLAC__ChannelAssignment)ca;
 				}
 			}
+			frame_header.channel_assignment = channel_assignment;
 		}
-
-		frame_header.channel_assignment = channel_assignment;
 
 		if(!FLAC__frame_add_header(&frame_header, threadtask->frame)) {
 			encoder->protected_->state = FLAC__STREAM_ENCODER_FRAMING_ERROR;
 			return false;
 		}
 
-		switch(channel_assignment) {
+		switch(frame_header.channel_assignment) {
 			case FLAC__CHANNEL_ASSIGNMENT_INDEPENDENT:
 				left_subframe  = &threadtask->subframe_workspace         [0][threadtask->best_subframe         [0]];
 				right_subframe = &threadtask->subframe_workspace         [1][threadtask->best_subframe         [1]];
@@ -3972,7 +3985,7 @@ FLAC__bool process_subframes_(FLAC__StreamEncoder *encoder, FLAC__StreamEncoderT
 				FLAC__ASSERT(0);
 		}
 
-		switch(channel_assignment) {
+		switch(frame_header.channel_assignment) {
 			case FLAC__CHANNEL_ASSIGNMENT_INDEPENDENT:
 				left_bps  = threadtask->subframe_bps         [0];
 				right_bps = threadtask->subframe_bps         [1];
@@ -4000,6 +4013,7 @@ FLAC__bool process_subframes_(FLAC__StreamEncoder *encoder, FLAC__StreamEncoderT
 			return false;
 	}
 	else {
+		FLAC__ASSERT(do_independent);
 		if(!FLAC__frame_add_header(&frame_header, threadtask->frame)) {
 			encoder->protected_->state = FLAC__STREAM_ENCODER_FRAMING_ERROR;
 			return false;
@@ -4011,13 +4025,6 @@ FLAC__bool process_subframes_(FLAC__StreamEncoder *encoder, FLAC__StreamEncoderT
 				return false;
 			}
 		}
-	}
-
-	if(encoder->protected_->loose_mid_side_stereo) {
-		encoder->private_->loose_mid_side_stereo_frame_count++;
-		if(encoder->private_->loose_mid_side_stereo_frame_count >= encoder->private_->loose_mid_side_stereo_frames)
-			encoder->private_->loose_mid_side_stereo_frame_count = 0;
-		encoder->private_->last_channel_assignment = frame_header.channel_assignment;
 	}
 
 	return true;
@@ -4426,11 +4433,11 @@ static void spotcheck_subframe_estimate_(
 	FLAC__bool ret;
 	FLAC__BitWriter *frame = FLAC__bitwriter_new();
 	if(frame == 0) {
-		fprintf(stderr, "EST: can't allocate frame\n");
+		flac_fprintf(stderr, "EST: can't allocate frame\n");
 		return;
 	}
 	if(!FLAC__bitwriter_init(frame)) {
-		fprintf(stderr, "EST: can't init frame\n");
+		flac_fprintf(stderr, "EST: can't init frame\n");
 		return;
 	}
 	ret = add_subframe_(encoder, blocksize, subframe_bps, subframe, frame);
@@ -4438,7 +4445,7 @@ static void spotcheck_subframe_estimate_(
 	{
 		const uint32_t actual = FLAC__bitwriter_get_input_bits_unconsumed(frame);
 		if(estimate != actual)
-			fprintf(stderr, "EST: bad, frame#%u sub#%%d type=%8s est=%u, actual=%u, delta=%d\n", encoder->private_->current_frame_number, FLAC__SubframeTypeString[subframe->type], estimate, actual, (int)actual-(int)estimate);
+			flac_fprintf(stderr, "EST: bad, frame#%u sub#%%d type=%8s est=%u, actual=%u, delta=%d\n", encoder->private_->current_frame_number, FLAC__SubframeTypeString[subframe->type], estimate, actual, (int)actual-(int)estimate);
 	}
 	FLAC__bitwriter_delete(frame);
 }
@@ -5000,9 +5007,6 @@ FLAC__bool set_partitioned_rice_(
 			rice_parameter = FLAC__bitmath_ilog2_wide(((mean - 1)*partition_samples_fixed_point_divisor)>>18) + 1;
 
 		if(rice_parameter >= rice_parameter_limit) {
-#ifndef NDEBUG
-			fprintf(stderr, "clipping rice_parameter (%u -> %u) @6\n", rice_parameter, rice_parameter_limit - 1);
-#endif
 			rice_parameter = rice_parameter_limit - 1;
 		}
 
@@ -5015,9 +5019,6 @@ FLAC__bool set_partitioned_rice_(
 				min_rice_parameter = rice_parameter - rice_parameter_search_dist;
 			max_rice_parameter = rice_parameter + rice_parameter_search_dist;
 			if(max_rice_parameter >= rice_parameter_limit) {
-#ifndef NDEBUG
-				fprintf(stderr, "clipping rice_parameter (%u -> %u) @7\n", max_rice_parameter, rice_parameter_limit - 1);
-#endif
 				max_rice_parameter = rice_parameter_limit - 1;
 			}
 		}

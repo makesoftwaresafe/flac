@@ -1,4 +1,4 @@
-name: GitHub Actions for specific options
+name: Building with specific options
 
 on:
   push:
@@ -21,10 +21,14 @@ jobs:
             cppflags: ''
             configure-opts: --disable-asm-optimizations
 
+          - name: no-ogg
+            cppflags: ''
+            configure-opts: --disable-ogg
+
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Install dependencies
         run: |
@@ -41,7 +45,7 @@ jobs:
           make check
 
       - name: Upload logs on failure
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v4
         if: failure()
         with:
           name: flac-${{ github.sha }}-${{ github.run_id }}-logs
